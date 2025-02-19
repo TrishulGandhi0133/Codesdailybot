@@ -158,8 +158,15 @@ class UserDatabase:
                 json.dump({}, f)
 
     def load(self):
-        with open(self.filename, "r") as f:
-            return json.load(f)
+        try:
+            with open(self.filename, "r") as f:
+                content = f.read().strip()
+                if not content:
+                    return {}
+                return json.loads(content)
+        except json.JSONDecodeError as e:
+            logger.error(f"Error loading JSON from {self.filename}: {e}")
+            return {}
 
     def save(self, data):
         with open(self.filename, "w") as f:
@@ -196,7 +203,7 @@ class PythonLearningBot:
 
     async def get_age(self, update: Update, context: CallbackContext) -> int:
         context.user_data["age"] = update.message.text
-        await update.message.reply_text("What is your grade? (e.g., 10th, 12th)")
+        await update.message.reply_text("What is your class grade? (e.g., 10th, 12th)")
         return GRADE
 
     async def get_grade(self, update: Update, context: CallbackContext) -> int:
