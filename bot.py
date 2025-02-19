@@ -196,7 +196,7 @@ class PythonLearningBot:
 
     async def get_age(self, update: Update, context: CallbackContext) -> int:
         context.user_data["age"] = update.message.text
-        await update.message.reply_text("What is your class grade? (e.g., 10th, 12th)")
+        await update.message.reply_text("What is your grade? (e.g., 10th, 12th)")
         return GRADE
 
     async def get_grade(self, update: Update, context: CallbackContext) -> int:
