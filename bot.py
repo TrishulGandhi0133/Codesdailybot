@@ -10,6 +10,8 @@ from groq import Groq
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, ConversationHandler, CallbackQueryHandler
 import logging
+from functools import partial
+import threading
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -40,8 +42,8 @@ class LLMGenerator:
         )
         return response.choices[0].message.content
 
-    def generate_question(self, grade, difficulty):
-        prompt = f"""Generate a Python coding question:
+    def generate_question(self, user_id, grade, difficulty):
+        prompt = f"""Generate a unique Python coding question for user {user_id} on {datetime.now().strftime('%Y-%m-%d')} based on :
                     Grade Level: {grade}
                     Difficulty: {difficulty}
                     
@@ -88,15 +90,30 @@ class LLMGenerator:
                     Grade: {grade}
                     Difficulty: {difficulty}
                     
-                    Provide JSON response:
+                    Evaluate the code in a lenient way and provide feedback to the user.
+
+                    Provide a correct JSON response in the following format:
                     {{
                         "score": 0-10,
                         "feedback": "positive feedback",
                         "improvements": "areas to improve",
                         "tip": "specific improvement tip",
                         "corrected_code": "improved version if needed"
-                    }}"""
-        return self.get_completion(prompt)
+                    }}
+
+                    Example of a correct JSON response:
+                    {{
+                        "score": 8,
+                        "feedback": "The submission is well-structured, readable, and follows good practices.",
+                        "improvements": "Error handling could be improved.",
+                        "tip": "Add input validation to handle edge cases.",
+                        "corrected_code": "def example_function():\\n    pass"
+                    }}
+
+                    IMPORTANT: Return ONLY valid JSON. Do not include any additional text or explanations.
+                    """
+        response = self.get_completion(prompt)
+        return response
 
     def generate_progress_insights(self, user_history):
         prompt = f"""Analyze this user's coding progress:
@@ -127,7 +144,7 @@ class LLMGenerator:
                     User Message: {user_message}
                     Context: {context}
                     
-                    talk it the user like a normal chatbot with precise answers to the user. eloborate only if they ask to."""
+                    talk it the user like a normal chatbot with precise answers to the user. elaborate only if they ask to."""
         return self.get_completion(prompt)
 
 class UserDatabase:
@@ -215,7 +232,7 @@ class PythonLearningBot:
         self.db.update_user(user_id, user_data)
 
         # Generate first question
-        question_json = self.llm.generate_question(user_data["grade"], user_data["difficulty"])
+        question_json = self.llm.generate_question(user_id, user_data["grade"], user_data["difficulty"])
         
         # Log the raw LLM response
         logger.info(f"Raw LLM Response: {question_json}")
@@ -299,7 +316,7 @@ class PythonLearningBot:
     async def handle_submission(self, update: Update, context: CallbackContext):
         user_id = str(update.message.chat_id)
         user_data = self.db.load().get(user_id, {})
-        
+
         # Check if the message contains a document
         if not update.message.document:
             await update.message.reply_text("Please upload a .txt or .py file.")
@@ -321,12 +338,12 @@ class PythonLearningBot:
 
         # Get evaluation from LLM
         evaluation = self.llm.evaluate_submission(
-            code, 
+            code,
             user_data.get('current_question', ''),
             user_data.get('grade', ''),
             user_data.get('difficulty', '')
         )
-        
+
         # Log the raw LLM response
         logger.info(f"Raw LLM Evaluation Response: {evaluation}")
 
@@ -334,7 +351,7 @@ class PythonLearningBot:
             # Clean up the response by removing potential markdown formatting
             cleaned_evaluation = evaluation.replace('```json\n', '').replace('```', '')
             eval_data = json.loads(cleaned_evaluation)
-            
+
             # Update user stats
             user_data['streak'] = user_data.get('streak', 0) + 1
             user_data['total_score'] = user_data.get('total_score', 0) + eval_data['score']
@@ -344,7 +361,7 @@ class PythonLearningBot:
                 'score': eval_data['score'],
                 'feedback': eval_data['feedback']
             })
-            
+
             # Save updated user data
             self.db.update_user(user_id, user_data)
 
@@ -355,24 +372,24 @@ class PythonLearningBot:
             # Send feedback to user
             feedback_message = f"""
             📝 Submission Evaluation:
-            
+
             Score: {eval_data['score']}/10
-            
+
             🌟 Positive Feedback:
             {eval_data['feedback']}
-            
+
             💡 Areas for Improvement:
             {eval_data['improvements']}
-            
+
             📌 Specific Tip:
             {eval_data['tip']}
-            
+
             💻 Improved Code:
             ```python
             {eval_data['corrected_code']}
             ```
             """
-            
+
             await update.message.reply_text(feedback_message)
 
         except json.JSONDecodeError as e:
@@ -381,12 +398,12 @@ class PythonLearningBot:
             # Provide a fallback evaluation
             fallback_message = """
             ⚠️ There was an issue processing the evaluation.
-            
+
             📝 Basic Evaluation:
             - Your code was received and processed
             - Please check the syntax and formatting
             - Try submitting again if needed
-            
+
             If the issue persists, please contact support.
             """
             await update.message.reply_text(fallback_message)
@@ -396,6 +413,7 @@ class PythonLearningBot:
         for user_id, user_data in users.items():
             if datetime.now().strftime("%H:%M") == user_data.get('preferred_time'):
                 question = self.llm.generate_question(
+                    user_id,
                     user_data['grade'],
                     user_data['difficulty']
                 )
@@ -497,15 +515,58 @@ class PythonLearningBot:
             logger.error(f"Error sending database file: {e}")
             await update.message.reply_text("❌ Error retrieving database file.")
 
+    async def check_and_send_questions(self):
+        users = self.db.load()
+        current_time = datetime.now().strftime("%H:%M")
+        logger.info(f"Checking questions at {current_time}")
+        
+        for user_id, user_data in users.items():
+            logger.info(f"User {user_id} preferred time: {user_data.get('preferred_time')}")
+            if user_data.get('preferred_time') == current_time:
+                logger.info(f"Sending question to user {user_id}")
+                try:
+                    question_json = self.llm.generate_question(
+                        user_id,
+                        user_data['grade'],
+                        user_data['difficulty']
+                    )
+                    
+                    question_data = json.loads(question_json)
+                    
+                    message = f"""
+                    📚 Daily Python Question:
+
+                    **Problem Statement:**
+                    {question_data['question']}
+
+                    **Example Input/Output:**
+                    {question_data['example']}
+
+                    **Test Cases:**
+                    {', '.join(question_data['test_cases'])}
+
+                    **Solution Template:**
+                    ```python
+                    {question_data['template']}
+                    ```
+
+                    You have 9 hours to submit your solution!
+                    """
+                    
+                    await self.send_message(user_id, message)
+                    logger.info(f"Sent daily question to user {user_id}")
+                except Exception as e:
+                    logger.error(f"Failed to send question to user {user_id}: {e}")
+
     def schedule_daily_tasks(self):
-        schedule.every().day.at("00:00").do(self.send_daily_questions)
-        schedule.every().sunday.at("09:00").do(self.send_weekly_challenge)
-        schedule.every(2).hours.do(self.check_submissions)
-
-        '''schedule.every(1).minutes.do(self.send_daily_questions)
-        schedule.every(1).minutes.do(self.send_weekly_challenge)
-        schedule.every(1).minutes.do(self.check_submissions)'''
-
+        # Check every minute instead of specific times
+        schedule.every(1).minutes.do(
+            lambda: asyncio.run(self.check_and_send_questions())
+        )
+        logger.info("Scheduled tasks set up")
+        schedule.every().sunday.at("09:00").do(
+            lambda: asyncio.run(self.send_weekly_challenge())
+        )
 
     async def set_commands(self, app):
         commands = [
@@ -558,12 +619,24 @@ class PythonLearningBot:
         app.add_handler(CommandHandler("settings", self.handle_settings))
         app.add_handler(CommandHandler("explain", self.handle_explain))
         app.add_handler(MessageHandler(filters.Document.ALL, self.handle_submission))
+        app.add_handler(CommandHandler("db_download", self.handle_db_download))
 
-        self.schedule_daily_tasks()
+        # Create and run the scheduler in a separate thread
+        def run_scheduler():
+            self.schedule_daily_tasks()
+            while True:
+                schedule.run_pending()
+                time.sleep(30)  # Check every 30 seconds
 
-        print("Bot is running...")
+        # Start scheduler in a separate thread
+        scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+        scheduler_thread.start()
+
+        # Add logging for bot startup
+        logger.info("Bot and scheduler are running...")
         app.run_polling()
 
 if __name__ == "__main__":
     bot = PythonLearningBot()
     bot.run()
+
