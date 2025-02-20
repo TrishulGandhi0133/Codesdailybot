@@ -12,6 +12,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import logging
 from functools import partial
 import threading
+import pytz
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -524,8 +525,10 @@ class PythonLearningBot:
 
     async def check_and_send_questions(self):
         users = self.db.load()
-        current_time = datetime.now().strftime("%H:%M")
-        logger.info(f"Checking questions at {current_time}")
+        # Get the current time in IST
+        ist = pytz.timezone('Asia/Kolkata')
+        current_time = datetime.now(ist).strftime("%H:%M")
+        logger.info(f"Checking questions at {current_time} IST")
         
         for user_id, user_data in users.items():
             logger.info(f"User {user_id} preferred time: {user_data.get('preferred_time')}")
